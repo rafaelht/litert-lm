@@ -38,9 +38,10 @@ router = APIRouter(prefix="/v1", tags=["openai-compatible"])
 
 
 def _sse_data(payload: dict[str, Any] | str) -> str:
+    # CORRECCIÓN: Usar saltos de línea reales (\n\n) en lugar de escapados (\\n\\n)
     if isinstance(payload, str):
-        return f"data: {payload}\\n\\n"
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\\n\\n"
+        return f"data: {payload}\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _estimate_token_count(text: str) -> int:
