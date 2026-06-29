@@ -38,6 +38,7 @@ requirements.txt
 
 - `MODEL_PATH` (default: `/models/gemma-4-E2B-it.litertlm/model.litertlm`)
 - `SERVER_PORT` (default: `8000`)
+- `HOST_PORT` (default: `8001`, puerto publicado en el host)
 - `SESSION_TIMEOUT` en segundos (default: `1800`)
 - `MAX_ACTIVE_CONVERSATIONS` (default: `1000`)
 
@@ -60,9 +61,9 @@ docker compose up -d
 
 El servicio quedara disponible en:
 
-- `http://localhost:${SERVER_PORT}/v1/models`
-- `http://localhost:${SERVER_PORT}/v1/chat/completions`
-- `http://localhost:${SERVER_PORT}/healthz`
+- `http://localhost:${HOST_PORT}/v1/models`
+- `http://localhost:${HOST_PORT}/v1/chat/completions`
+- `http://localhost:${HOST_PORT}/healthz`
 
 ## Nota de rendimiento
 

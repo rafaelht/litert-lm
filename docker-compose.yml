@@ -9,6 +9,6 @@ services:
       SESSION_TIMEOUT: ${SESSION_TIMEOUT:-1800}
       MAX_ACTIVE_CONVERSATIONS: ${MAX_ACTIVE_CONVERSATIONS:-1000}
     ports:
-      - "${SERVER_PORT:-8000}:8000"
+      - "${HOST_PORT:-8001}:${SERVER_PORT:-8000}"
     volumes:
       - /volume2/docker/litertlm/litert-home/models:/models:ro
