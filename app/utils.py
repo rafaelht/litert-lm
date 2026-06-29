@@ -86,20 +86,20 @@ def extract_system_prompt(messages: list[dict[str, Any]]) -> str:
     for message in messages:
         if message.get("role") in {"system", "developer"}:
             system_parts.append(normalize_text_content(message.get("content")))
-    return "\n".join([part for part in system_parts if part])
+    return "\n".join([part for part in system_parts if part]).strip()
 
 
 def extract_first_user_message(messages: list[dict[str, Any]]) -> str:
+    # CORRECCIÓN: Garantiza consistencia extrayendo siempre el primer 'user' y aplicando .strip()
     for message in messages:
         if message.get("role") == "user":
-            return normalize_text_content(message.get("content"))
+            return normalize_text_content(message.get("content")).strip()
     return ""
 
 
 def extract_incremental_message(messages: list[dict[str, Any]]) -> str:
     if not messages:
         raise ValueError("messages must not be empty")
-    # LiteRT espera que las interacciones subsecuentes sean strings planos del usuario
     return normalize_text_content(messages[-1].get("content", ""))
 
 
@@ -128,7 +128,6 @@ def bootstrap_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         content = normalize_text_content(msg.get("content", ""))
 
-        # Si hay system prompt, se concatena al primer mensaje del usuario para no romper la plantilla de Gemma
         if i == first_user_idx and system_prompt:
             content = f"{system_prompt}\n\n{content}"
 
@@ -157,7 +156,6 @@ def sdk_message_to_text(message: Any) -> str:
         if isinstance(content, dict) and isinstance(content.get("text"), str):
             return content["text"]
 
-    # Si viene directamente el objeto chunk de litert_lm/mediapipe
     if hasattr(message, "text"):
         return str(message.text)
 
