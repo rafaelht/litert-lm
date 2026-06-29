@@ -96,41 +96,72 @@ def extract_first_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def extract_incremental_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
+def extract_incremental_message(messages: list[dict[str, Any]]) -> str:
     if not messages:
         raise ValueError("messages must not be empty")
-    return messages[-1]
+    # LiteRT espera que las interacciones subsecuentes sean strings planos del usuario
+    return normalize_text_content(messages[-1].get("content", ""))
 
 
 def bootstrap_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Formatea el historial OpenAI convirtiendo prompts del sistema en contexto inyectado 
+    y filtrando solo los turnos que LiteRT entiende (user/assistant).
+    """
     if len(messages) <= 1:
         return []
-    return messages[:-1]
+
+    system_prompt = extract_system_prompt(messages)
+    history = messages[:-1]
+    bootstrapped: list[dict[str, Any]] = []
+
+    first_user_idx = -1
+    for i, msg in enumerate(history):
+        if msg.get("role") == "user":
+            first_user_idx = i
+            break
+
+    for i, msg in enumerate(history):
+        role = msg.get("role")
+        if role in {"system", "developer"}:
+            continue
+
+        content = normalize_text_content(msg.get("content", ""))
+
+        # Si hay system prompt, se concatena al primer mensaje del usuario para no romper la plantilla de Gemma
+        if i == first_user_idx and system_prompt:
+            content = f"{system_prompt}\n\n{content}"
+
+        if role in {"user", "assistant"}:
+            bootstrapped.append({"role": role, "content": content})
+
+    return bootstrapped
 
 
-def sdk_message_to_text(message: dict[str, Any]) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
+def sdk_message_to_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
 
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                if item.get("type") == "text" and isinstance(item.get("text"), str):
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
                     parts.append(item["text"])
-                elif isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-            elif isinstance(item, str):
-                parts.append(item)
-        return "".join(parts)
-
-    if isinstance(content, dict):
-        if isinstance(content.get("text"), str):
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "".join(parts)
+        if isinstance(content, dict) and isinstance(content.get("text"), str):
             return content["text"]
 
-    # Fallback keeps compatibility with unknown SDK shapes.
+    # Si viene directamente el objeto chunk de litert_lm/mediapipe
+    if hasattr(message, "text"):
+        return str(message.text)
+
     try:
-        return json.dumps(content, ensure_ascii=False)
+        return json.dumps(message, ensure_ascii=False)
     except Exception:
         return ""
