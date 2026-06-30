@@ -86,10 +86,20 @@ async def chat_completions(
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    # CORTOCIRCUITO: Interceptar prompts de tags/títulos antes de instanciar o mutar la conversación de LiteRT
-    if "Generate 1-3 broad tags" in incremental_message or "tags" in incremental_message.lower():
-        logger.info("[BYPASS] Interceptado prompt de tags/títulos. Retornando mock JSON estático.")
-        mock_json = '{"tags": ["Technology", "Software Development", "Spring Boot", "Programming"]}'
+    # CORTOCIRCUITO: Intercepción de prompts administrativos de OpenWebUI (Tags y Títulos)
+    msg_lower = incremental_message.lower()
+    is_internal_prompt = (
+        "generate 1-3 broad tags" in msg_lower or
+        "short title" in msg_lower or
+        "title for this conversation" in msg_lower or
+        "creative title" in msg_lower or
+        (len(message_dicts) == 1 and "tags" in msg_lower) or
+        (incremental_message.startswith("### Task:") and "JSON format" in incremental_message)
+    )
+
+    if is_internal_prompt:
+        logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI. Retornando mock JSON híbrido.")
+        mock_json = '{"tags": ["Technology", "Software Development"], "title": "Conversación de Desarrollo"}'
         
         if request.stream:
             async def static_stream() -> AsyncIterator[str]:
@@ -161,7 +171,6 @@ async def chat_completions(
                     iterator = state.conversation.send_message_async(incremental_message)
                     
                     while True:
-                        # Si el cliente canceló, drenamos el iterador sin romper el generador nativo de C++
                         disconnected = await raw_request.is_disconnected()
 
                         try:
