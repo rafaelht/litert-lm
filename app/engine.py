@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _engine: Optional[Engine] = None
 _engine_lock = asyncio.Lock()
+_engine_just_reloaded: bool = False
 
 # Variables para control de TTL
 _last_active_time: float = 0.0
@@ -65,7 +66,7 @@ async def _monitor_inactivity() -> None:
 
 async def init_engine() -> Engine:
     """Inicializa de manera segura el motor garantizando concurrencia idempotente."""
-    global _engine, _cleanup_task
+    global _engine, _cleanup_task, _engine_just_reloaded
 
     if _engine is not None:
         update_engine_activity()
@@ -81,6 +82,7 @@ async def init_engine() -> Engine:
         _engine = await asyncio.to_thread(Engine, settings.model_path)
         logger.info("LiteRT engine initialized")
         
+        _engine_just_reloaded = True
         update_engine_activity()
         
         if _cleanup_task is None or _cleanup_task.done():
@@ -95,6 +97,15 @@ def get_engine() -> Engine:
     if _engine is not None:
         update_engine_activity()
     return _engine
+
+
+def check_and_consume_reload_flag() -> bool:
+    """Retorna si el motor se recargó y consume el estado (atómico)."""
+    global _engine_just_reloaded
+    if _engine_just_reloaded:
+        _engine_just_reloaded = False
+        return True
+    return False
 
 
 async def close_engine() -> None:

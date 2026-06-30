@@ -13,8 +13,7 @@ from anyio import to_thread
 
 from app.config import get_settings
 from app.conversation_manager import get_conversation_manager
-# Importación corregida para incluir el inicializador y actualizador de actividad
-from app.engine import get_engine, init_engine, update_engine_activity
+from app.engine import get_engine, init_engine, update_engine_activity, check_and_consume_reload_flag
 from app.schemas import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -48,7 +47,6 @@ def _estimate_token_count(text: str) -> int:
         return 0
 
     try:
-        # Intentar obtener el engine si ya está mapeado
         engine = get_engine()
         if engine is None:
             return 0
@@ -63,7 +61,6 @@ def _generate_heuristic_title(prompt: str) -> str:
     if not prompt:
         return "Conversación General"
     
-    # Limpieza básica de caracteres molestos
     clean_text = prompt.replace('"', '').replace("'", "").replace("`", "").strip()
     lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
     first_line = lines[0] if lines else clean_text
@@ -72,11 +69,9 @@ def _generate_heuristic_title(prompt: str) -> str:
     if not words:
         return "Conversación General"
 
-    # Tomar las primeras 4 o 5 palabras significativas
     title_words = words[:4]
     title = " ".join(title_words)
 
-    # Capitalizar de forma estética si es texto plano largo
     if len(title) > 30:
         title = title[:27] + "..."
     
@@ -137,7 +132,6 @@ async def chat_completions(
         if is_title_req:
             chat_title = "Conversación General"
             try:
-                # Buscar el prompt real del usuario en reversa
                 user_prompt = ""
                 for msg in reversed(message_dicts):
                     content = normalize_text_content(msg.get("content", ""))
@@ -151,7 +145,6 @@ async def chat_completions(
                 if "user:" in user_prompt.lower():
                     user_prompt = user_prompt.lower().split("user:")[-1].strip()
 
-                # Generar título dinámico sin riesgo de SegFault ni colisión de memoria
                 chat_title = _generate_heuristic_title(user_prompt)
                 
             except Exception as e:
@@ -209,12 +202,19 @@ async def chat_completions(
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
 
+    # Si el motor se recreó, invalidar las instancias corruptas de C++ del caché
+    if check_and_consume_reload_flag():
+        logger.info("Detectada recarga del Engine. Limpiando caché de conversaciones obsoletas.")
+        if hasattr(manager, "_conversations"):
+            manager._conversations.clear()
+        elif hasattr(manager, "clear"):
+            manager.clear()
+
     state = await manager.get_or_create(
         conversation_id,
         bootstrap_messages=bootstrap_messages(message_dicts),
     )
     
-    # Notificar actividad al gestor de tiempo del motor
     update_engine_activity()
 
     if request.stream:
