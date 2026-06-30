@@ -196,15 +196,19 @@ async def chat_completions(
     # 2. FLUJO NORMAL DE CONVERSACIÓN (Aislado y Protegido)
     
     # Asegurar recarga transparente del motor si fue removido por inactividad
-    await init_engine()
+    engine_instance = await init_engine()
 
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
 
-    # Si el motor se recreó, invalidar las instancias corruptas de C++ del caché
+    # Si el motor se recreó, actualizar referencias internas y limpiar el caché
     if check_and_consume_reload_flag():
-        logger.info("Detectada recarga del Engine. Limpiando caché de conversaciones obsoletas.")
+        logger.info("Detectada recarga del Engine. Limpiando y reasignando referencias de C++.")
+        
+        if hasattr(manager, "_engine"):
+            manager._engine = engine_instance
+            
         if hasattr(manager, "_conversations"):
             manager._conversations.clear()
         elif hasattr(manager, "clear"):
