@@ -19,7 +19,7 @@ _engine_just_reloaded: bool = False
 # Variables para control de TTL
 _last_active_time: float = 0.0
 _cleanup_task: Optional[asyncio.Task] = None
-TTL_SECONDS: int = 300  # 5 minutos en reposo antes de descargar
+TTL_SECONDS: int = 3600  # 1 hora en reposo antes de descargar
 
 
 def force_garbage_collection() -> None:
