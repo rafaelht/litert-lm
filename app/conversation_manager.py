@@ -41,6 +41,7 @@ class ConversationManager:
             state = self._conversations.get(conversation_id)
             if state is not None:
                 state.touch()
+                logger.info("Reusing existing conversation: %s", conversation_id)
                 return state
 
             await self._evict_if_needed_locked()
@@ -95,7 +96,13 @@ class ConversationManager:
         state = self._conversations.pop(conversation_id, None)
         if state is None:
             return
-        await asyncio.to_thread(state.conversation.close)
+        
+        # Evitar excepciones si el objeto Conversation del SDK no expone .close()
+        if hasattr(state.conversation, "close"):
+            try:
+                await asyncio.to_thread(state.conversation.close)
+            except Exception:
+                logger.exception("Error closing conversation backend thread for %s", conversation_id)
 
     async def close_all(self) -> None:
         async with self._manager_lock:
