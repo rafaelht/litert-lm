@@ -101,32 +101,42 @@ async def chat_completions(
         logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI. Generando contenido dinámico aislado.")
         
         tags_list = ["Technology", "Software Development"]
-        chat_title = "Conversación General"
+        chat_title = "Conversación Nueva"
         
         if "title" in msg_lower or "short title" in msg_lower:
             try:
-                first_user_msg = "Chat"
+                # Extraer el primer contenido de texto real disponible en el payload, ignorando prompts del sistema
+                context_text = ""
                 for msg in message_dicts:
-                    if msg.get("role") == "user":
-                        first_user_msg = normalize_text_content(msg.get("content"))
+                    content = normalize_text_content(msg.get("content", ""))
+                    if content and "task:" not in content.lower() and "generate" not in content.lower():
+                        context_text = content
                         break
                 
-                engine = get_engine()
-                temp_conversation = engine.start_conversation()
-                
-                title_prompt = (
-                    f"Genera un título extremadamente corto (máximo 4 palabras) y sin comillas "
-                    f"para un chat que empieza con este mensaje: '{first_user_msg}'"
-                )
-                
-                sdk_title_response = await asyncio.to_thread(
-                    temp_conversation.send_message,
-                    title_prompt,
-                )
-                
-                extracted_title = sdk_message_to_text(sdk_title_response).strip()
-                chat_title = extracted_title.replace('"', '').replace('\n', '').strip()
-                del temp_conversation
+                # Fallback si no se encontró un mensaje limpio
+                if not context_text and message_dicts:
+                    context_text = normalize_text_content(message_dicts[0].get("content", ""))
+
+                if context_text:
+                    engine = get_engine()
+                    temp_conversation = engine.start_conversation()
+                    
+                    # Prompt agresivo para forzar un título corto basado estrictamente en el texto
+                    title_prompt = (
+                        f"Responde ÚNICAMENTE con un título corto de 2 a 4 palabras para este texto. "
+                        f"No agregues introducciones, comillas, ni explicaciones. Texto: '{context_text[:150]}'"
+                    )
+                    
+                    sdk_title_response = await asyncio.to_thread(
+                        temp_conversation.send_message,
+                        title_prompt,
+                    )
+                    
+                    extracted_title = sdk_message_to_text(sdk_title_response).strip()
+                    if extracted_title:
+                        chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
+                    
+                    del temp_conversation
                 
             except Exception as e:
                 logger.error("[BYPASS ERROR] No se pudo generar el título dinámico: %s. Usando fallback.", str(e))
