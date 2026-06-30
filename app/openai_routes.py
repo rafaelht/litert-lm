@@ -92,7 +92,7 @@ async def chat_completions(
     is_title_req = (
         "title" in msg_lower or 
         "creative title" in msg_lower or
-        (request.max_tokens and request.max_tokens <= 16)
+        (request.max_tokens is not None and request.max_tokens <= 16)
     )
     
     is_tags_req = (
@@ -107,63 +107,55 @@ async def chat_completions(
         if is_title_req:
             chat_title = "Conversación General"
             try:
-                # Reconstruir el historial limpio de la conversación enviada por OpenWebUI
+                # Reconstruir el historial limpio enviado por OpenWebUI
                 cleaned_history = []
                 for msg in message_dicts:
                     role = msg.get("role", "user")
                     content = normalize_text_content(msg.get("content", ""))
-                    # Ignorar el prompt del sistema de OpenWebUI dentro del historial
                     if "task:" in content.lower() or "generate a" in content.lower():
                         continue
                     cleaned_history.append(f"{role.upper()}: {content}")
                 
-                history_str = "\n".join(cleaned_history[-4:])  # Tomar los últimos giros para contexto rápido
+                history_str = "\n".join(cleaned_history[-4:])
 
-                api_key = extract_api_key(authorization)
-                manager = get_conversation_manager()
+                # Instanciar una conversación efímera directamente desde el engine (Aislamiento total)
+                engine = get_engine()
+                temp_conversation = engine.start_conversation()
                 
-                # Forzar un ID único y efímero en el manager para no tocar el KV-Cache del chat real
-                title_conv_id = f"system_title_gen_{uuid.uuid4().hex}"
-                title_state = await manager.get_or_create(title_conv_id, bootstrap_messages=[])
+                title_prompt = (
+                    "Genera un título corto de 2 a 4 palabras basado en el siguiente texto.\n"
+                    "Responde únicamente con el texto plano del título, sin comillas, sin JSON, sin introducciones.\n\n"
+                    f"Texto:\n{history_str}\n\n"
+                    "Título:"
+                )
                 
-                async with title_state.lock:
-                    title_state.touch()
-                    
-                    # Prompt hiper-restrictivo directo para Gemma
-                    title_prompt = (
-                        "Eres un asignador de títulos profesional.\n"
-                        "Reglas estrictas:\n"
-                        "- Devuelve ÚNICAMENTE el título.\n"
-                        "- Máximo 4 palabras.\n"
-                        "- Sin comillas, sin puntos, sin JSON, sin Markdown.\n"
-                        f"Conversación:\n{history_str}\n"
-                        "Título:"
-                    )
-                    
-                    sdk_title_response = await asyncio.to_thread(
-                        title_state.conversation.send_message,
-                        title_prompt,
-                    )
-                    
-                    extracted_title = sdk_message_to_text(sdk_title_response).strip()
-                    if extracted_title:
-                        # Limpieza extrema por si el modelo ignora instrucciones
-                        chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
-                        if "{" in chat_title:
-                            chat_title = chat_title.split(":")[-1].replace("}", "").replace('"', '').strip()
+                sdk_title_response = await asyncio.to_thread(
+                    temp_conversation.send_message,
+                    title_prompt,
+                )
                 
-                # Destrucción inmediata del estado temporal del título
-                if title_conv_id in manager._states:
-                    del manager._states[title_conv_id]
+                extracted_title = sdk_message_to_text(sdk_title_response).strip()
+                if extracted_title:
+                    chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
+                    # Safe guard contra formato JSON inesperado
+                    if chat_title.startswith("{"):
+                        try:
+                            js_data = json.loads(chat_title)
+                            chat_title = js_data.get("title", "Conversación General")
+                        except Exception:
+                            if "title" in chat_title.lower():
+                                chat_title = chat_title.split(":")[-1].replace("}", "").replace('"', '').strip()
+                
+                del temp_conversation
                     
             except Exception as e:
                 logger.error("[BYPASS ERROR] Error en generación de título: %s", str(e))
+                chat_title = "Conversación General"
             
-            # Formatear la respuesta exactamente como JSON Object nativo (Lo que OpenWebUI espera)
             mock_payload = {"title": chat_title}
 
         else:
-            # Cortocircuito inmediato para Tags (Evita inferencia innecesaria)
+            # Cortocircuito inmediato para Tags sin procesamiento de IA
             mock_payload = ["Technology", "Code"]
 
         mock_json = json.dumps(mock_payload, ensure_ascii=False)
@@ -203,7 +195,7 @@ async def chat_completions(
                 }]
             })
 
-    # 2. FLUJO NORMAL DE CONVERSACIÓN (Mantiene el KV-Cache intacto)
+    # 2. FLUJO NORMAL DE CONVERSACIÓN (Mantiene el KV-Cache intacto sin mutaciones extrañas)
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
