@@ -80,11 +80,54 @@ async def chat_completions(
     if not message_dicts:
         raise HTTPException(status_code=400, detail="messages must not be empty")
 
-    api_key = extract_api_key(authorization)
-    
-    # Debug de control para auditar variaciones generadas por el cliente web
     logger.info("[DEBUG] Payload messages count: %d", len(message_dicts))
-    
+
+    incremental_message = extract_incremental_message(message_dicts).strip()
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    # CORTOCIRCUITO: Interceptar prompts de tags/títulos antes de instanciar o mutar la conversación de LiteRT
+    if "Generate 1-3 broad tags" in incremental_message or "tags" in incremental_message.lower():
+        logger.info("[BYPASS] Interceptado prompt de tags/títulos. Retornando mock JSON estático.")
+        mock_json = '{"tags": ["Technology", "Software Development", "Spring Boot", "Programming"]}'
+        
+        if request.stream:
+            async def static_stream() -> AsyncIterator[str]:
+                yield _sse_data({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
+                })
+                yield _sse_data({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{"index": 0, "delta": {"content": mock_json}, "finish_reason": "stop"}]
+                })
+                yield _sse_data("[DONE]")
+            return StreamingResponse(
+                static_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            )
+        else:
+            return JSONResponse(content={
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": request.model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": mock_json},
+                    "finish_reason": "stop"
+                }]
+            })
+
+    # FLUJO NORMAL: Inicialización del estado síncrono del backend
+    api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
 
@@ -92,16 +135,6 @@ async def chat_completions(
         conversation_id,
         bootstrap_messages=bootstrap_messages(message_dicts),
     )
-
-    # Limpieza estricta del mensaje incremental entrante
-    incremental_message = extract_incremental_message(message_dicts).strip()
-    
-    # Sanitización ante inyecciones estructuradas o bloques JSON de OpenWebUI
-    if incremental_message.startswith("{") or "tags" in incremental_message.lower():
-        logger.warning("[ALERTA PROMPT] Detectado prompt estructurado/JSON: %s", incremental_message)
-
-    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created = int(time.time())
 
     if request.stream:
 
@@ -124,24 +157,11 @@ async def chat_completions(
                 }
                 yield _sse_data(first_chunk)
 
-                # SI ES UN PROMPT INTERNO DE OPENWEBUI, RESPONDEMOS UN JSON ESTÁTICO SEGURO
-                if "Generate 1-3 broad tags" in incremental_message or "tags" in incremental_message.lower():
-                    yield _sse_data({
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": request.model,
-                        "choices": [{"index": 0, "delta": {"content": '{"tags": ["General"]}'}, "finish_reason": "stop"}]
-                    })
-                    yield _sse_data("[DONE]")
-                    return
-
                 try:
                     iterator = state.conversation.send_message_async(incremental_message)
                     
                     while True:
-                        # NO HACER BREAK AQUÍ. Si rompemos el ciclo, destruimos el generador nativo de C++ y da Core Dump.
-                        # Consumimos el iterador por completo silenciosamente si el cliente se desconecta.
+                        # Si el cliente canceló, drenamos el iterador sin romper el generador nativo de C++
                         disconnected = await raw_request.is_disconnected()
 
                         try:
@@ -153,7 +173,6 @@ async def chat_completions(
 
                         state.touch()
                         
-                        # Si no está desconectado, enviamos la data normalmente
                         if not disconnected:
                             text_piece = sdk_message_to_text(sdk_chunk)
                             if not text_piece:
@@ -200,6 +219,16 @@ async def chat_completions(
                 }
                 yield _sse_data(final_chunk)
                 yield _sse_data("[DONE]")
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # Bloque síncrono estándar (No-Stream)
     async with state.lock:
