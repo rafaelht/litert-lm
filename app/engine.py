@@ -95,3 +95,20 @@ def get_engine() -> Engine:
     if _engine is not None:
         update_engine_activity()
     return _engine
+
+
+async def close_engine() -> None:
+    """Función requerida por app/main.py para liberar recursos al apagar el contenedor."""
+    global _engine
+
+    async with _engine_lock:
+        if _engine is None:
+            return
+
+        engine = _engine
+        _engine = None
+        logger.info("Closing LiteRT engine")
+        await asyncio.to_thread(engine.close)
+        logger.info("LiteRT engine closed")
+        
+        force_garbage_collection()
