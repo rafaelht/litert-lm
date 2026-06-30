@@ -54,6 +54,31 @@ def _estimate_token_count(text: str) -> int:
         return 0
 
 
+def _generate_heuristic_title(prompt: str) -> str:
+    """Genera un título dinámico, limpio y ultra-rápido basado en el texto del usuario."""
+    if not prompt:
+        return "Conversación General"
+    
+    # Limpieza básica de caracteres molestos
+    clean_text = prompt.replace('"', '').replace("'", "").replace("`", "").strip()
+    lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
+    first_line = lines[0] if lines else clean_text
+
+    words = first_line.split()
+    if not words:
+        return "Conversación General"
+
+    # Tomar las primeras 4 o 5 palabras significativas
+    title_words = words[:4]
+    title = " ".join(title_words)
+
+    # Capitalizar de forma estética si es texto plano largo
+    if len(title) > 30:
+        title = title[:27] + "..."
+    
+    return title.strip().capitalize()
+
+
 @router.get("/models", response_model=OpenAIModelListResponse)
 async def list_models() -> OpenAIModelListResponse:
     settings = get_settings()
@@ -86,7 +111,7 @@ async def chat_completions(
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    # 1. CORTOCIRCUITO: Detección robusta de prompts administrativos (Títulos y Tags)
+    # 1. CORTOCIRCUITO: Intercepción de prompts administrativos (Títulos y Tags)
     msg_lower = incremental_message.lower()
     
     is_title_req = (
@@ -107,10 +132,8 @@ async def chat_completions(
         
         if is_title_req:
             chat_title = "Conversación General"
-            temp_title_id = f"tmp_title_{uuid.uuid4().hex}"
-            manager = get_conversation_manager()
             try:
-                # ESTRATEGIA: Extraer el prompt original del usuario buscando en reversa
+                # Buscar el prompt real del usuario en reversa
                 user_prompt = ""
                 for msg in reversed(message_dicts):
                     content = normalize_text_content(msg.get("content", ""))
@@ -124,50 +147,16 @@ async def chat_completions(
                 if "user:" in user_prompt.lower():
                     user_prompt = user_prompt.lower().split("user:")[-1].strip()
 
-                if user_prompt:
-                    temp_state = await manager.get_or_create(
-                        temp_title_id,
-                        bootstrap_messages=[],
-                    )
-                    
-                    async with temp_state.lock:
-                        temp_state.touch()
-                        title_prompt = (
-                            "Eres un asignador de títulos automatizado.\n"
-                            "Genera un título de 2 a 4 palabras basado estrictamente en el texto provisto.\n"
-                            "Reglas:\n"
-                            "- Responde ÚNICAMENTE con el título plano.\n"
-                            "- No uses comillas, puntos, ni formato JSON.\n"
-                            "- No expliques nada.\n\n"
-                            f"Texto: {user_prompt[:300]}\n\n"
-                            "Título:"
-                        )
-                        
-                        sdk_title_response = await asyncio.to_thread(
-                            temp_state.conversation.send_message,
-                            title_prompt,
-                        )
-                        
-                        extracted_title = sdk_message_to_text(sdk_title_response).strip()
-                        if extracted_title:
-                            chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
-                            if "{" in chat_title:
-                                chat_title = chat_title.split(":")[-1].replace("}", "").replace('"', '').strip()
+                # Generar título dinámico sin riesgo de SegFault ni colisión de memoria
+                chat_title = _generate_heuristic_title(user_prompt)
                 
             except Exception as e:
-                logger.error("[BYPASS ERROR] Error en generación de título dinámico: %s", str(e))
+                logger.error("[BYPASS ERROR] Error procesando título: %s", str(e))
                 chat_title = "Conversación General"
-            finally:
-                # Limpieza preventiva del estado temporal si la clase expone un método de eliminación o el diccionario interno
-                if hasattr(manager, "_states") and temp_title_id in manager._states:
-                    del manager._states[temp_title_id]
-                elif hasattr(manager, "conversations") and temp_title_id in manager.conversations:
-                    del manager.conversations[temp_title_id]
             
             mock_payload = {"title": chat_title}
 
         else:
-            # Cortocircuito estático e inmediato para los Tags
             mock_payload = ["Technology", "Code"]
 
         mock_json = json.dumps(mock_payload, ensure_ascii=False)
@@ -207,7 +196,7 @@ async def chat_completions(
                 }]
             })
 
-    # 2. FLUJO NORMAL DE CONVERSACIÓN (Totalmente intacto)
+    # 2. FLUJO NORMAL DE CONVERSACIÓN (Aislado y Protegido)
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
