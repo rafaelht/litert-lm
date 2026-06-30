@@ -12,3 +12,7 @@ services:
       - "${HOST_PORT:-8005}:${SERVER_PORT:-8000}"
     volumes:
       - /volume2/docker/litertlm/litert-home/models:/models:ro
+    deploy:
+      resources:
+        limits:
+          memory: 3G
