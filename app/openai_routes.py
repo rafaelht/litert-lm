@@ -86,37 +86,37 @@ async def chat_completions(
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    # CORTOCIRCUITO DETECT: Detección y tipificación de prompts administrativos de OpenWebUI
+    # 1. EVALUACIÓN Y DETECCIÓN CRÍTICA DE PROMPTS ADMINISTRATIVOS (CORTOCIRCUITO)
     msg_lower = incremental_message.lower()
     
-    is_title_prompt = (
-        "short title" in msg_lower or
-        "title for this conversation" in msg_lower or
-        "creative title" in msg_lower
+    # Detección granular por intención del prompt interno
+    is_title_req = (
+        "short title" in msg_lower or 
+        "title for this conversation" in msg_lower or 
+        "creative title" in msg_lower or
+        ("title" in msg_lower and "### task:" in msg_lower)
     )
     
-    is_tags_prompt = (
+    is_tags_req = (
         "generate 1-3 broad tags" in msg_lower or
-        (len(message_dicts) == 1 and "tags" in msg_lower) or
-        (incremental_message.startswith("### Task:") and "JSON format" in incremental_message and "tags" in msg_lower)
+        "tags for this conversation" in msg_lower or
+        (incremental_message.startswith("### Task:") and "tags" in msg_lower) or
+        (len(message_dicts) == 1 and "tags" in msg_lower)
     )
 
-    if is_title_prompt or is_tags_prompt:
-        logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI.")
+    if is_title_req or is_tags_req:
+        logger.info("[BYPASS] Detectada petición administrativa interna de OpenWebUI.")
         
-        # Payload por defecto que OpenWebUI acepta de forma híbrida
-        mock_payload = {
-            "tags": ["Dev"],
-            "title": "Nuevo Chat"
-        }
+        # Estructura base híbrida segura
+        mock_payload: Any = {"tags": ["Dev"], "title": "Nuevo Chat"}
 
-        if is_title_prompt:
+        if is_title_req:
             try:
-                # Extraer el contexto real del usuario ignorando los wrappers del sistema
+                # Extraer texto del usuario ignorando instrucciones de sistema o tasks
                 context_text = ""
                 for msg in message_dicts:
                     content = normalize_text_content(msg.get("content", ""))
-                    if content and "task:" not in content.lower() and "generate" not in content.lower():
+                    if content and "task:" not in content.lower() and "generate" not in content.lower() and "title" not in content.lower()[:30]:
                         context_text = content
                         break
                 
@@ -138,8 +138,9 @@ async def chat_completions(
                     async with title_state.lock:
                         title_state.touch()
                         title_prompt = (
-                            f"Genera un título muy corto, de 2 a 4 palabras, basado estrictamente en el siguiente texto. "
-                            f"Responde SOLO con el título, sin comillas, ni introducciones. Texto: {context_text[:200]}"
+                            f"Genera un título de 2 a 4 palabras basado en el siguiente texto. "
+                            f"Responde ÚNICAMENTE con el texto del título plano, sin comillas, sin formato JSON, "
+                            f"ni introducciones. Texto: {context_text[:150]}"
                         )
                         
                         sdk_title_response = await asyncio.to_thread(
@@ -149,19 +150,29 @@ async def chat_completions(
                         
                         extracted_title = sdk_message_to_text(sdk_title_response).strip()
                         if extracted_title:
-                            mock_payload["title"] = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
+                            # Sanitizar salidas que pretendan ser JSON o que tengan comillas
+                            cleaned = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
+                            if cleaned.startswith("{") and "title" in cleaned.lower():
+                                try:
+                                    # Safe guard si el modelo devuelve JSON a pesar de la instrucción
+                                    js_data = json.loads(cleaned)
+                                    cleaned = js_data.get("title", "Conversación Activa")
+                                except Exception:
+                                    cleaned = cleaned.replace("{", "").replace("}", "")
+                            mock_payload["title"] = cleaned
                     
                     if title_conv_id in manager._states:
                         del manager._states[title_conv_id]
                 
             except Exception as e:
-                logger.error("[BYPASS ERROR] Error en inferencia dinámica de título: %s", str(e))
-                mock_payload["title"] = "Conversación de Desarrollo"
+                logger.error("[BYPASS ERROR] Error procesando título dinámico: %s", str(e))
+                mock_payload["title"] = "Conversación General"
         
-        elif is_tags_prompt:
-            # Cortocircuito inmediato para tags: Evita pasar por el LLM por completo
+        elif is_tags_req:
+            # Respuesta directa de tags nativa sin pasar por inferencia (Ahorro de recursos)
             mock_payload = ["Technology", "Code"]
 
+        # Convertir a JSON string para inyectar en la respuesta OpenAI compatible
         mock_json = json.dumps(mock_payload, ensure_ascii=False)
         
         if request.stream:
@@ -199,7 +210,7 @@ async def chat_completions(
                 }]
             })
 
-    # FLUJO NORMAL: Inicialización del estado síncrono del backend
+    # 2. FLUJO NORMAL DE CONVERSACIÓN (Mantiene el KV-Cache limpio)
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
