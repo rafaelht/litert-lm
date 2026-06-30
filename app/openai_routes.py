@@ -124,13 +124,25 @@ async def chat_completions(
                 }
                 yield _sse_data(first_chunk)
 
+                # SI ES UN PROMPT INTERNO DE OPENWEBUI, RESPONDEMOS UN JSON ESTÁTICO SEGURO
+                if "Generate 1-3 broad tags" in incremental_message or "tags" in incremental_message.lower():
+                    yield _sse_data({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": request.model,
+                        "choices": [{"index": 0, "delta": {"content": '{"tags": ["General"]}'}, "finish_reason": "stop"}]
+                    })
+                    yield _sse_data("[DONE]")
+                    return
+
                 try:
                     iterator = state.conversation.send_message_async(incremental_message)
                     
                     while True:
-                        if await raw_request.is_disconnected():
-                            logger.warning("Client disconnected. Aborting LiteRT stream context.")
-                            break
+                        # NO HACER BREAK AQUÍ. Si rompemos el ciclo, destruimos el generador nativo de C++ y da Core Dump.
+                        # Consumimos el iterador por completo silenciosamente si el cliente se desconecta.
+                        disconnected = await raw_request.is_disconnected()
 
                         try:
                             sdk_chunk = await to_thread.run_sync(next, iterator, None)
@@ -140,24 +152,27 @@ async def chat_completions(
                             break
 
                         state.touch()
-                        text_piece = sdk_message_to_text(sdk_chunk)
-                        if not text_piece:
-                            continue
+                        
+                        # Si no está desconectado, enviamos la data normalmente
+                        if not disconnected:
+                            text_piece = sdk_message_to_text(sdk_chunk)
+                            if not text_piece:
+                                continue
 
-                        payload = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": request.model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": text_piece},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        yield _sse_data(payload)
+                            payload = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": request.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": text_piece},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                            yield _sse_data(payload)
                         
                 except Exception as exc:
                     logger.exception("Streaming failed for conversation %s", conversation_id)
@@ -185,16 +200,6 @@ async def chat_completions(
                 }
                 yield _sse_data(final_chunk)
                 yield _sse_data("[DONE]")
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
 
     # Bloque síncrono estándar (No-Stream)
     async with state.lock:
