@@ -86,26 +86,33 @@ async def chat_completions(
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    # CORTOCIRCUITO: Intercepción de prompts administrativos de OpenWebUI (Tags y Títulos)
+    # CORTOCIRCUITO DETECT: Detección y tipificación de prompts administrativos de OpenWebUI
     msg_lower = incremental_message.lower()
-    is_internal_prompt = (
-        "generate 1-3 broad tags" in msg_lower or
+    
+    is_title_prompt = (
         "short title" in msg_lower or
         "title for this conversation" in msg_lower or
-        "creative title" in msg_lower or
+        "creative title" in msg_lower
+    )
+    
+    is_tags_prompt = (
+        "generate 1-3 broad tags" in msg_lower or
         (len(message_dicts) == 1 and "tags" in msg_lower) or
-        (incremental_message.startswith("### Task:") and "JSON format" in incremental_message)
+        (incremental_message.startswith("### Task:") and "JSON format" in incremental_message and "tags" in msg_lower)
     )
 
-    if is_internal_prompt:
-        logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI. Generando contenido dinámico.")
+    if is_title_prompt or is_tags_prompt:
+        logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI.")
         
-        tags_list = ["Technology", "Software Development"]
-        chat_title = "Conversación Nueva"
-        
-        if "title" in msg_lower or "short title" in msg_lower:
+        # Payload por defecto que OpenWebUI acepta de forma híbrida
+        mock_payload = {
+            "tags": ["Dev"],
+            "title": "Nuevo Chat"
+        }
+
+        if is_title_prompt:
             try:
-                # 1. Extraer el contexto real del usuario (primer mensaje con contenido relevante)
+                # Extraer el contexto real del usuario ignorando los wrappers del sistema
                 context_text = ""
                 for msg in message_dicts:
                     content = normalize_text_content(msg.get("content", ""))
@@ -120,11 +127,9 @@ async def chat_completions(
                     api_key = extract_api_key(authorization)
                     manager = get_conversation_manager()
                     
-                    # 2. Crear un ID de conversación aislado exclusivo para la inferencia del título
                     base_id = make_conversation_id(api_key, request.model, message_dicts)
                     title_conv_id = f"title_generation_{base_id}"
                     
-                    # Inicializar estado estructurado nativo usando el manager del sistema
                     title_state = await manager.get_or_create(
                         title_conv_id,
                         bootstrap_messages=[],
@@ -144,19 +149,19 @@ async def chat_completions(
                         
                         extracted_title = sdk_message_to_text(sdk_title_response).strip()
                         if extracted_title:
-                            chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
+                            mock_payload["title"] = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
                     
-                    # 3. Remover el estado temporal del manager para liberar memoria RAM inmediatamente
                     if title_conv_id in manager._states:
                         del manager._states[title_conv_id]
                 
             except Exception as e:
                 logger.error("[BYPASS ERROR] Error en inferencia dinámica de título: %s", str(e))
+                mock_payload["title"] = "Conversación de Desarrollo"
         
-        mock_payload = {
-            "tags": tags_list,
-            "title": chat_title
-        }
+        elif is_tags_prompt:
+            # Cortocircuito inmediato para tags: Evita pasar por el LLM por completo
+            mock_payload = ["Technology", "Code"]
+
         mock_json = json.dumps(mock_payload, ensure_ascii=False)
         
         if request.stream:
