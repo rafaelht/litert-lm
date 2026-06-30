@@ -13,7 +13,8 @@ from anyio import to_thread
 
 from app.config import get_settings
 from app.conversation_manager import get_conversation_manager
-from app.engine import get_engine
+# Importación corregida para incluir el inicializador y actualizador de actividad
+from app.engine import get_engine, init_engine, update_engine_activity
 from app.schemas import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -43,11 +44,14 @@ def _sse_data(payload: dict[str, Any] | str) -> str:
 
 
 def _estimate_token_count(text: str) -> int:
-    engine = get_engine()
     if not text:
         return 0
 
     try:
+        # Intentar obtener el engine si ya está mapeado
+        engine = get_engine()
+        if engine is None:
+            return 0
         tokens = engine.tokenize(text)
         return len(tokens) if isinstance(tokens, list) else 0
     except Exception:
@@ -197,6 +201,10 @@ async def chat_completions(
             })
 
     # 2. FLUJO NORMAL DE CONVERSACIÓN (Aislado y Protegido)
+    
+    # Asegurar recarga transparente del motor si fue removido por inactividad
+    await init_engine()
+
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
@@ -205,12 +213,16 @@ async def chat_completions(
         conversation_id,
         bootstrap_messages=bootstrap_messages(message_dicts),
     )
+    
+    # Notificar actividad al gestor de tiempo del motor
+    update_engine_activity()
 
     if request.stream:
 
         async def event_stream() -> AsyncIterator[str]:
             async with state.lock:
                 state.touch()
+                update_engine_activity()
 
                 first_chunk = {
                     "id": completion_id,
@@ -241,6 +253,7 @@ async def chat_completions(
                             break
 
                         state.touch()
+                        update_engine_activity()
                         
                         if not disconnected:
                             text_piece = sdk_message_to_text(sdk_chunk)
@@ -302,6 +315,7 @@ async def chat_completions(
     # Bloque síncrono estándar (No-Stream)
     async with state.lock:
         state.touch()
+        update_engine_activity()
         try:
             sdk_response = await asyncio.to_thread(
                 state.conversation.send_message,
