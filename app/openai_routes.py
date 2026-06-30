@@ -86,93 +86,86 @@ async def chat_completions(
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    # 1. EVALUACIÓN Y DETECCIÓN CRÍTICA DE PROMPTS ADMINISTRATIVOS (CORTOCIRCUITO)
+    # 1. CORTOCIRCUITO: Detección robusta de prompts administrativos (Títulos y Tags)
     msg_lower = incremental_message.lower()
     
-    # Detección granular por intención del prompt interno
     is_title_req = (
-        "short title" in msg_lower or 
-        "title for this conversation" in msg_lower or 
+        "title" in msg_lower or 
         "creative title" in msg_lower or
-        ("title" in msg_lower and "### task:" in msg_lower)
+        (request.max_tokens and request.max_tokens <= 16)
     )
     
     is_tags_req = (
         "generate 1-3 broad tags" in msg_lower or
         "tags for this conversation" in msg_lower or
-        (incremental_message.startswith("### Task:") and "tags" in msg_lower) or
         (len(message_dicts) == 1 and "tags" in msg_lower)
     )
 
     if is_title_req or is_tags_req:
-        logger.info("[BYPASS] Detectada petición administrativa interna de OpenWebUI.")
+        logger.info("[BYPASS] Interceptada petición administrativa de OpenWebUI.")
         
-        # Estructura base híbrida segura
-        mock_payload: Any = {"tags": ["Dev"], "title": "Nuevo Chat"}
-
         if is_title_req:
+            chat_title = "Conversación General"
             try:
-                # Extraer texto del usuario ignorando instrucciones de sistema o tasks
-                context_text = ""
+                # Reconstruir el historial limpio de la conversación enviada por OpenWebUI
+                cleaned_history = []
                 for msg in message_dicts:
+                    role = msg.get("role", "user")
                     content = normalize_text_content(msg.get("content", ""))
-                    if content and "task:" not in content.lower() and "generate" not in content.lower() and "title" not in content.lower()[:30]:
-                        context_text = content
-                        break
+                    # Ignorar el prompt del sistema de OpenWebUI dentro del historial
+                    if "task:" in content.lower() or "generate a" in content.lower():
+                        continue
+                    cleaned_history.append(f"{role.upper()}: {content}")
                 
-                if not context_text and message_dicts:
-                    context_text = normalize_text_content(message_dicts[0].get("content", ""))
+                history_str = "\n".join(cleaned_history[-4:])  # Tomar los últimos giros para contexto rápido
 
-                if context_text:
-                    api_key = extract_api_key(authorization)
-                    manager = get_conversation_manager()
+                api_key = extract_api_key(authorization)
+                manager = get_conversation_manager()
+                
+                # Forzar un ID único y efímero en el manager para no tocar el KV-Cache del chat real
+                title_conv_id = f"system_title_gen_{uuid.uuid4().hex}"
+                title_state = await manager.get_or_create(title_conv_id, bootstrap_messages=[])
+                
+                async with title_state.lock:
+                    title_state.touch()
                     
-                    base_id = make_conversation_id(api_key, request.model, message_dicts)
-                    title_conv_id = f"title_generation_{base_id}"
-                    
-                    title_state = await manager.get_or_create(
-                        title_conv_id,
-                        bootstrap_messages=[],
+                    # Prompt hiper-restrictivo directo para Gemma
+                    title_prompt = (
+                        "Eres un asignador de títulos profesional.\n"
+                        "Reglas estrictas:\n"
+                        "- Devuelve ÚNICAMENTE el título.\n"
+                        "- Máximo 4 palabras.\n"
+                        "- Sin comillas, sin puntos, sin JSON, sin Markdown.\n"
+                        f"Conversación:\n{history_str}\n"
+                        "Título:"
                     )
                     
-                    async with title_state.lock:
-                        title_state.touch()
-                        title_prompt = (
-                            f"Genera un título de 2 a 4 palabras basado en el siguiente texto. "
-                            f"Responde ÚNICAMENTE con el texto del título plano, sin comillas, sin formato JSON, "
-                            f"ni introducciones. Texto: {context_text[:150]}"
-                        )
-                        
-                        sdk_title_response = await asyncio.to_thread(
-                            title_state.conversation.send_message,
-                            title_prompt,
-                        )
-                        
-                        extracted_title = sdk_message_to_text(sdk_title_response).strip()
-                        if extracted_title:
-                            # Sanitizar salidas que pretendan ser JSON o que tengan comillas
-                            cleaned = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
-                            if cleaned.startswith("{") and "title" in cleaned.lower():
-                                try:
-                                    # Safe guard si el modelo devuelve JSON a pesar de la instrucción
-                                    js_data = json.loads(cleaned)
-                                    cleaned = js_data.get("title", "Conversación Activa")
-                                except Exception:
-                                    cleaned = cleaned.replace("{", "").replace("}", "")
-                            mock_payload["title"] = cleaned
+                    sdk_title_response = await asyncio.to_thread(
+                        title_state.conversation.send_message,
+                        title_prompt,
+                    )
                     
-                    if title_conv_id in manager._states:
-                        del manager._states[title_conv_id]
+                    extracted_title = sdk_message_to_text(sdk_title_response).strip()
+                    if extracted_title:
+                        # Limpieza extrema por si el modelo ignora instrucciones
+                        chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
+                        if "{" in chat_title:
+                            chat_title = chat_title.split(":")[-1].replace("}", "").replace('"', '').strip()
                 
+                # Destrucción inmediata del estado temporal del título
+                if title_conv_id in manager._states:
+                    del manager._states[title_conv_id]
+                    
             except Exception as e:
-                logger.error("[BYPASS ERROR] Error procesando título dinámico: %s", str(e))
-                mock_payload["title"] = "Conversación General"
-        
-        elif is_tags_req:
-            # Respuesta directa de tags nativa sin pasar por inferencia (Ahorro de recursos)
+                logger.error("[BYPASS ERROR] Error en generación de título: %s", str(e))
+            
+            # Formatear la respuesta exactamente como JSON Object nativo (Lo que OpenWebUI espera)
+            mock_payload = {"title": chat_title}
+
+        else:
+            # Cortocircuito inmediato para Tags (Evita inferencia innecesaria)
             mock_payload = ["Technology", "Code"]
 
-        # Convertir a JSON string para inyectar en la respuesta OpenAI compatible
         mock_json = json.dumps(mock_payload, ensure_ascii=False)
         
         if request.stream:
@@ -210,7 +203,7 @@ async def chat_completions(
                 }]
             })
 
-    # 2. FLUJO NORMAL DE CONVERSACIÓN (Mantiene el KV-Cache limpio)
+    # 2. FLUJO NORMAL DE CONVERSACIÓN (Mantiene el KV-Cache intacto)
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
