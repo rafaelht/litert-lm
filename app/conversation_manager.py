@@ -18,6 +18,14 @@ class ConversationState:
     conversation_id: str
     conversation: Conversation
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    system_prompt: str = ""
+    system_hash: str = ""
+    memory: str = ""
+    memory_hash: str = ""
+    history_hash: str = ""
+    message_count: int = 0
+    last_message_hash: str = ""
+    created_at: float = field(default_factory=now_ts)
     last_access: float = field(default_factory=now_ts)
 
     def touch(self) -> None:
@@ -36,6 +44,7 @@ class ConversationManager:
         conversation_id: str,
         *,
         bootstrap_messages: list[dict[str, Any]],
+        system_message: str | None = None,
     ) -> ConversationState:
         async with self._manager_lock:
             state = self._conversations.get(conversation_id)
@@ -49,12 +58,50 @@ class ConversationManager:
             conversation = await asyncio.to_thread(
                 self._engine.create_conversation,
                 messages=bootstrap_messages,
+                system_message=system_message,
             )
             state = ConversationState(
                 conversation_id=conversation_id,
                 conversation=conversation,
             )
             self._conversations[conversation_id] = state
+            return state
+
+    async def rebuild(
+        self,
+        conversation_id: str,
+        *,
+        bootstrap_messages: list[dict[str, Any]],
+        system_message: str | None = None,
+    ) -> ConversationState:
+        async with self._manager_lock:
+            old_state = self._conversations.pop(conversation_id, None)
+
+            if old_state is not None and hasattr(old_state.conversation, "close"):
+                try:
+                    await asyncio.to_thread(old_state.conversation.close)
+                except Exception:
+                    logger.exception("Error closing conversation before rebuild: %s", conversation_id)
+
+            await self._evict_if_needed_locked()
+            logger.info("Rebuilding conversation: %s", conversation_id)
+            conversation = await asyncio.to_thread(
+                self._engine.create_conversation,
+                messages=bootstrap_messages,
+                system_message=system_message,
+            )
+            state = ConversationState(
+                conversation_id=conversation_id,
+                conversation=conversation,
+            )
+            self._conversations[conversation_id] = state
+            return state
+
+    async def get(self, conversation_id: str) -> ConversationState | None:
+        async with self._manager_lock:
+            state = self._conversations.get(conversation_id)
+            if state is not None:
+                state.touch()
             return state
 
     async def _evict_if_needed_locked(self) -> None:

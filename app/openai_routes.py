@@ -13,6 +13,11 @@ from anyio import to_thread
 
 from app.config import get_settings
 from app.conversation_manager import get_conversation_manager
+from app.conversation_synchronizer import (
+    ConversationSynchronizer,
+    apply_snapshot_to_state,
+    build_completed_history,
+)
 from app.engine import get_engine, init_engine, update_engine_activity, check_and_consume_reload_flag
 from app.schemas import (
     ChatCompletionChoice,
@@ -24,7 +29,6 @@ from app.schemas import (
     OpenAIModelListResponse,
 )
 from app.utils import (
-    bootstrap_messages,
     extract_api_key,
     extract_incremental_message,
     make_conversation_id,
@@ -214,10 +218,13 @@ async def chat_completions(
         elif hasattr(manager, "clear"):
             manager.clear()
 
-    state = await manager.get_or_create(
+    sync_result = await ConversationSynchronizer(manager).sync(
         conversation_id,
-        bootstrap_messages=bootstrap_messages(message_dicts),
+        message_dicts,
     )
+    state = sync_result.state
+    sync_snapshot = sync_result.snapshot
+    incremental_message = sync_snapshot.last_content
     
     update_engine_activity()
 
@@ -243,6 +250,7 @@ async def chat_completions(
                 }
                 yield _sse_data(first_chunk)
 
+                response_parts: list[str] = []
                 try:
                     iterator = state.conversation.send_message_async(incremental_message)
                     
@@ -259,11 +267,12 @@ async def chat_completions(
                         state.touch()
                         update_engine_activity()
                         
-                        if not disconnected:
-                            text_piece = sdk_message_to_text(sdk_chunk)
-                            if not text_piece:
-                                continue
+                        text_piece = sdk_message_to_text(sdk_chunk)
+                        if not text_piece:
+                            continue
+                        response_parts.append(text_piece)
 
+                        if not disconnected:
                             payload = {
                                 "id": completion_id,
                                 "object": "chat.completion.chunk",
@@ -289,6 +298,15 @@ async def chat_completions(
                         }
                     }
                     yield _sse_data(err_payload)
+                    return
+
+                response_text = "".join(response_parts)
+                completed_history = build_completed_history(sync_snapshot, response_text)
+                apply_snapshot_to_state(
+                    state,
+                    sync_snapshot,
+                    history_messages=completed_history,
+                )
 
                 final_chunk = {
                     "id": completion_id,
@@ -330,6 +348,12 @@ async def chat_completions(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     response_text = sdk_message_to_text(sdk_response)
+    completed_history = build_completed_history(sync_snapshot, response_text)
+    apply_snapshot_to_state(
+        state,
+        sync_snapshot,
+        history_messages=completed_history,
+    )
 
     prompt_text = "\n".join(normalize_text_content(msg.get("content")) for msg in message_dicts)
     prompt_tokens = _estimate_token_count(prompt_text)

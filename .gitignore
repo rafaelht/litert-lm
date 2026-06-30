@@ -50,3 +50,5 @@ Thumbs.db
 
 # Docker
 *.tar
+
+models
