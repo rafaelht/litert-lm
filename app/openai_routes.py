@@ -81,6 +81,10 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail="messages must not be empty")
 
     api_key = extract_api_key(authorization)
+    
+    # Debug de control para auditar variaciones generadas por el cliente web
+    logger.info("[DEBUG] Payload messages count: %d", len(message_dicts))
+    
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
 
@@ -89,7 +93,13 @@ async def chat_completions(
         bootstrap_messages=bootstrap_messages(message_dicts),
     )
 
-    incremental_message = extract_incremental_message(message_dicts)
+    # Limpieza estricta del mensaje incremental entrante
+    incremental_message = extract_incremental_message(message_dicts).strip()
+    
+    # Sanitización ante inyecciones estructuradas o bloques JSON de OpenWebUI
+    if incremental_message.startswith("{") or "tags" in incremental_message.lower():
+        logger.warning("[ALERTA PROMPT] Detectado prompt estructurado/JSON: %s", incremental_message)
+
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
@@ -118,12 +128,10 @@ async def chat_completions(
                     iterator = state.conversation.send_message_async(incremental_message)
                     
                     while True:
-                        # Si el cliente canceló la petición (OpenWebUI/Cierre de pestaña), salimos inmediatamente
                         if await raw_request.is_disconnected():
-                            logger.warning("Client disconnected. Aborting LiteRT stream context to prevent CPU leakage.")
+                            logger.warning("Client disconnected. Aborting LiteRT stream context.")
                             break
 
-                        # Consumir iterador síncrono del SDK de forma segura sin bloquear el event loop
                         try:
                             sdk_chunk = await to_thread.run_sync(next, iterator, None)
                             if sdk_chunk is None:
