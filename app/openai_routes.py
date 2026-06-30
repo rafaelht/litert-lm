@@ -5,12 +5,11 @@ import json
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Header, HTTPException
-from fastapi import Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from starlette.concurrency import iterate_in_threadpool
+from anyio import to_thread
 
 from app.config import get_settings
 from app.conversation_manager import get_conversation_manager
@@ -38,7 +37,6 @@ router = APIRouter(prefix="/v1", tags=["openai-compatible"])
 
 
 def _sse_data(payload: dict[str, Any] | str) -> str:
-    # CORRECCIÓN: Usar saltos de línea reales (\n\n) en lugar de escapados (\\n\\n)
     if isinstance(payload, str):
         return f"data: {payload}\n\n"
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -72,6 +70,7 @@ async def list_models() -> OpenAIModelListResponse:
 @router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
+    raw_request: Request,
     authorization: str | None = Header(default=None),
 ) -> Response:
     message_dicts = [
@@ -96,11 +95,10 @@ async def chat_completions(
 
     if request.stream:
 
-        async def event_stream() -> Any:
+        async def event_stream() -> AsyncIterator[str]:
             async with state.lock:
                 state.touch()
 
-                # OpenAI streams a first chunk with assistant role.
                 first_chunk = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -118,7 +116,21 @@ async def chat_completions(
 
                 try:
                     iterator = state.conversation.send_message_async(incremental_message)
-                    async for sdk_chunk in iterate_in_threadpool(iterator):
+                    
+                    while True:
+                        # Si el cliente canceló la petición (OpenWebUI/Cierre de pestaña), salimos inmediatamente
+                        if await raw_request.is_disconnected():
+                            logger.warning("Client disconnected. Aborting LiteRT stream context to prevent CPU leakage.")
+                            break
+
+                        # Consumir iterador síncrono del SDK de forma segura sin bloquear el event loop
+                        try:
+                            sdk_chunk = await to_thread.run_sync(next, iterator, None)
+                            if sdk_chunk is None:
+                                break
+                        except StopIteration:
+                            break
+
                         state.touch()
                         text_piece = sdk_message_to_text(sdk_chunk)
                         if not text_piece:
@@ -138,6 +150,7 @@ async def chat_completions(
                             ],
                         }
                         yield _sse_data(payload)
+                        
                 except Exception as exc:
                     logger.exception("Streaming failed for conversation %s", conversation_id)
                     err_payload = {
@@ -175,6 +188,7 @@ async def chat_completions(
             },
         )
 
+    # Bloque síncrono estándar (No-Stream)
     async with state.lock:
         state.touch()
         try:

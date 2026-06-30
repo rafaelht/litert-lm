@@ -90,7 +90,6 @@ def extract_system_prompt(messages: list[dict[str, Any]]) -> str:
 
 
 def extract_first_user_message(messages: list[dict[str, Any]]) -> str:
-    # CORRECCIÓN: Garantiza consistencia extrayendo siempre el primer 'user' y aplicando .strip()
     for message in messages:
         if message.get("role") == "user":
             return normalize_text_content(message.get("content")).strip()
