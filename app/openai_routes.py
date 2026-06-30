@@ -98,14 +98,14 @@ async def chat_completions(
     )
 
     if is_internal_prompt:
-        logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI. Generando contenido dinámico aislado.")
+        logger.info("[BYPASS] Interceptado prompt administrativo de OpenWebUI. Generando contenido dinámico.")
         
         tags_list = ["Technology", "Software Development"]
         chat_title = "Conversación Nueva"
         
         if "title" in msg_lower or "short title" in msg_lower:
             try:
-                # Extraer el primer contenido de texto real disponible en el payload, ignorando prompts del sistema
+                # 1. Extraer el contexto real del usuario (primer mensaje con contenido relevante)
                 context_text = ""
                 for msg in message_dicts:
                     content = normalize_text_content(msg.get("content", ""))
@@ -113,33 +113,45 @@ async def chat_completions(
                         context_text = content
                         break
                 
-                # Fallback si no se encontró un mensaje limpio
                 if not context_text and message_dicts:
                     context_text = normalize_text_content(message_dicts[0].get("content", ""))
 
                 if context_text:
-                    engine = get_engine()
-                    temp_conversation = engine.start_conversation()
+                    api_key = extract_api_key(authorization)
+                    manager = get_conversation_manager()
                     
-                    # Prompt agresivo para forzar un título corto basado estrictamente en el texto
-                    title_prompt = (
-                        f"Responde ÚNICAMENTE con un título corto de 2 a 4 palabras para este texto. "
-                        f"No agregues introducciones, comillas, ni explicaciones. Texto: '{context_text[:150]}'"
+                    # 2. Crear un ID de conversación aislado exclusivo para la inferencia del título
+                    base_id = make_conversation_id(api_key, request.model, message_dicts)
+                    title_conv_id = f"title_generation_{base_id}"
+                    
+                    # Inicializar estado estructurado nativo usando el manager del sistema
+                    title_state = await manager.get_or_create(
+                        title_conv_id,
+                        bootstrap_messages=[],
                     )
                     
-                    sdk_title_response = await asyncio.to_thread(
-                        temp_conversation.send_message,
-                        title_prompt,
-                    )
+                    async with title_state.lock:
+                        title_state.touch()
+                        title_prompt = (
+                            f"Genera un título muy corto, de 2 a 4 palabras, basado estrictamente en el siguiente texto. "
+                            f"Responde SOLO con el título, sin comillas, ni introducciones. Texto: {context_text[:200]}"
+                        )
+                        
+                        sdk_title_response = await asyncio.to_thread(
+                            title_state.conversation.send_message,
+                            title_prompt,
+                        )
+                        
+                        extracted_title = sdk_message_to_text(sdk_title_response).strip()
+                        if extracted_title:
+                            chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
                     
-                    extracted_title = sdk_message_to_text(sdk_title_response).strip()
-                    if extracted_title:
-                        chat_title = extracted_title.replace('"', '').replace("'", "").replace('\n', '').strip()
-                    
-                    del temp_conversation
+                    # 3. Remover el estado temporal del manager para liberar memoria RAM inmediatamente
+                    if title_conv_id in manager._states:
+                        del manager._states[title_conv_id]
                 
             except Exception as e:
-                logger.error("[BYPASS ERROR] No se pudo generar el título dinámico: %s. Usando fallback.", str(e))
+                logger.error("[BYPASS ERROR] Error en inferencia dinámica de título: %s", str(e))
         
         mock_payload = {
             "tags": tags_list,
