@@ -27,12 +27,14 @@ from app.schemas import (
     OpenAIModel,
     OpenAIModelListResponse,
 )
+from app.tools import build_runtime_tools
 from app.utils import (
     extract_api_key,
     extract_incremental_message,
     make_conversation_id,
     normalize_text_content,
     sdk_message_to_text,
+    stable_json_hash,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,12 @@ async def chat_completions(
     raw_request: Request,
     authorization: str | None = Header(default=None),
 ) -> Response:
+    request_extra = request.model_extra or {}
+    request_tools = request_extra.get("tools")
+    request_tool_choice = request_extra.get("tool_choice")
+    runtime_tools = build_runtime_tools(request_tools)
+    automatic_tool_calling = not bool(runtime_tools)
+
     message_dicts = [
         message.model_dump(by_alias=True, exclude_none=True)
         for message in request.messages
@@ -201,6 +209,15 @@ async def chat_completions(
 
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
+    if runtime_tools:
+        conversation_id = stable_json_hash(
+            {
+                "base": conversation_id,
+                "tools": request_tools,
+                "tool_choice": request_tool_choice,
+            }
+        )
+
     manager = get_conversation_manager()
 
     if check_and_consume_reload_flag():
@@ -215,6 +232,8 @@ async def chat_completions(
     sync_result = await ConversationSynchronizer(manager).sync(
         conversation_id,
         message_dicts,
+        tools=runtime_tools if runtime_tools else None,
+        automatic_tool_calling=automatic_tool_calling,
     )
     state = sync_result.state
     sync_snapshot = sync_result.snapshot
@@ -268,6 +287,25 @@ async def chat_completions(
                         update_engine_activity()
 
                         text_piece = sdk_message_to_text(sdk_chunk)
+                        tool_calls = sdk_chunk.get("tool_calls") if isinstance(sdk_chunk, dict) else None
+
+                        if tool_calls:
+                            payload = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": request.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"tool_calls": tool_calls},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                            yield _sse_data(payload)
+                            continue
+
                         if not text_piece:
                             continue
 
@@ -374,6 +412,7 @@ async def chat_completions(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     response_text = sdk_message_to_text(sdk_response)
+    tool_calls = sdk_response.get("tool_calls") if isinstance(sdk_response, dict) else None
     completed_history = build_completed_history(sync_snapshot, response_text)
     apply_snapshot_to_state(
         state,
@@ -391,8 +430,11 @@ async def chat_completions(
         model=request.model,
         choices=[
             ChatCompletionChoice(
-                message=ChatCompletionMessage(content=response_text),
-                finish_reason="stop",
+                message=ChatCompletionMessage(
+                    content=response_text,
+                    tool_calls=tool_calls,
+                ),
+                finish_reason="tool_calls" if tool_calls else "stop",
             )
         ],
         usage=ChatCompletionUsage(

@@ -43,7 +43,8 @@ class ChatCompletionRequest(BaseModel):
 
 class ChatCompletionMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
-    content: str
+    content: str | None = ""
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class ChatCompletionChoice(BaseModel):

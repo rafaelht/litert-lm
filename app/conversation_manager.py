@@ -46,12 +46,14 @@ class ConversationManager:
         bootstrap_messages: list[dict[str, Any]],
         system_message: str | None = None,
         tools: list[Any] | None = None,
+        automatic_tool_calling: bool = True,
     ) -> Conversation:
         return await asyncio.to_thread(
             self._engine.create_conversation,
             messages=bootstrap_messages,
             system_message=system_message,
-            tools=tools or get_available_tools(),
+            tools=tools if tools is not None else get_available_tools(),
+            automatic_tool_calling=automatic_tool_calling,
         )
 
     async def get_or_create(
@@ -60,6 +62,8 @@ class ConversationManager:
         *,
         bootstrap_messages: list[dict[str, Any]],
         system_message: str | None = None,
+        tools: list[Any] | None = None,
+        automatic_tool_calling: bool = True,
     ) -> ConversationState:
         async with self._manager_lock:
             state = self._conversations.get(conversation_id)
@@ -73,7 +77,8 @@ class ConversationManager:
             conversation = await self._create_conversation(
                 bootstrap_messages=bootstrap_messages,
                 system_message=system_message,
-                tools=get_available_tools(),
+                tools=tools,
+                automatic_tool_calling=automatic_tool_calling,
             )
             state = ConversationState(
                 conversation_id=conversation_id,
@@ -88,6 +93,8 @@ class ConversationManager:
         *,
         bootstrap_messages: list[dict[str, Any]],
         system_message: str | None = None,
+        tools: list[Any] | None = None,
+        automatic_tool_calling: bool = True,
     ) -> ConversationState:
         async with self._manager_lock:
             old_state = self._conversations.pop(conversation_id, None)
@@ -103,7 +110,8 @@ class ConversationManager:
             conversation = await self._create_conversation(
                 bootstrap_messages=bootstrap_messages,
                 system_message=system_message,
-                tools=get_available_tools(),
+                tools=tools,
+                automatic_tool_calling=automatic_tool_calling,
             )
             state = ConversationState(
                 conversation_id=conversation_id,

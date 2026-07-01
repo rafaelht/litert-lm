@@ -63,6 +63,9 @@ class ConversationSynchronizer:
         self,
         conversation_id: str,
         messages: list[dict[str, Any]],
+        *,
+        tools: list[Any] | None = None,
+        automatic_tool_calling: bool = True,
     ) -> SyncResult:
         snapshot = build_snapshot(messages)
         state = await self._manager.get(conversation_id)
@@ -72,6 +75,8 @@ class ConversationSynchronizer:
                 conversation_id,
                 bootstrap_messages=snapshot.context_messages,
                 system_message=snapshot.sdk_system_message or None,
+                tools=tools,
+                automatic_tool_calling=automatic_tool_calling,
             )
             apply_snapshot_to_state(state, snapshot)
             logger.info("Conversation sync created: %s", conversation_id)
@@ -86,6 +91,8 @@ class ConversationSynchronizer:
             conversation_id,
             bootstrap_messages=snapshot.context_messages,
             system_message=snapshot.sdk_system_message or None,
+            tools=tools,
+            automatic_tool_calling=automatic_tool_calling,
         )
         apply_snapshot_to_state(state, snapshot)
         logger.info("Conversation sync rebuilt %s due to %s", conversation_id, reason)
