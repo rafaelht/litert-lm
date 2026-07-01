@@ -40,6 +40,7 @@ class ConversationSnapshot:
     last_message_hash: str
     last_role: str
     last_content: str
+    last_message: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,10 @@ def build_snapshot(messages: list[dict[str, Any]]) -> ConversationSnapshot:
     last_message = messages[-1] if messages else {}
     last_role = str(last_message.get("role", ""))
     last_content = normalize_text_content(last_message.get("content", "")).strip()
+    last_message_payload = {
+        "role": last_role,
+        "content": last_message.get("content", "") if last_role else "",
+    }
 
     return ConversationSnapshot(
         system_prompt=system_prompt,
@@ -113,6 +118,7 @@ def build_snapshot(messages: list[dict[str, Any]]) -> ConversationSnapshot:
         last_message_hash=stable_json_hash({"role": last_role, "content": last_content}),
         last_role=last_role,
         last_content=last_content,
+        last_message=last_message_payload,
     )
 
 
@@ -154,11 +160,11 @@ def apply_snapshot_to_state(
 def build_completed_history(
     snapshot: ConversationSnapshot,
     assistant_response: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     completed = list(snapshot.context_messages)
 
     if snapshot.last_role == "user" and snapshot.last_content:
-        completed.append({"role": "user", "content": snapshot.last_content})
+        completed.append(snapshot.last_message)
 
     completed.append({"role": "assistant", "content": assistant_response})
     return completed

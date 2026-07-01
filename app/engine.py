@@ -8,6 +8,11 @@ import platform
 import time
 from typing import Optional
 
+try:
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover
+    psutil = None
+
 from litert_lm import Engine
 from litert_lm.interfaces import CPU
 
@@ -26,58 +31,47 @@ TTL_SECONDS: int = 3600  # 1 hora en reposo antes de descargar
 
 
 def _get_optimal_threads() -> int:
-    """
-    Determina automáticamente el número de hilos optimizado para LiteRT-LM (XNNPACK).
-
-    Prioridad:
-        1. Variable de entorno LITERT_THREADS.
-        2. Detección inteligente de núcleos basada en el diseño de LiteRT (P-Cores vs E-Cores).
-        3. Valor por defecto seguro (4).
-    """
+    """Determina el número óptimo de hilos para LiteRT-LM."""
     env_threads = os.getenv("LITERT_THREADS")
-
     if env_threads:
         try:
             threads = max(1, int(env_threads))
-            logger.info(
-                "Using %d threads from LITERT_THREADS environment variable.",
-                threads,
-            )
+            logger.info("Using %d threads from LITERT_THREADS environment variable.", threads)
             return threads
         except ValueError:
-            logger.warning(
-                "Invalid LITERT_THREADS value '%s'. Falling back to auto detection.",
-                env_threads,
-            )
+            logger.warning("Invalid LITERT_THREADS value '%s'. Falling back to auto detection.", env_threads)
 
-    try:
-        import psutil
+    env_threads_override = os.getenv("LITERT_NUM_THREADS")
+    if env_threads_override:
+        try:
+            threads = max(1, int(env_threads_override))
+            logger.info("Using %d threads from LITERT_NUM_THREADS environment variable.", threads)
+            return threads
+        except ValueError:
+            logger.warning("Invalid LITERT_NUM_THREADS value '%s'. Falling back to auto detection.", env_threads_override)
 
-        physical = psutil.cpu_count(logical=False)
+    if psutil is not None:
+        try:
+            logical = psutil.cpu_count(logical=True) or 0
+            physical = psutil.cpu_count(logical=False) or 0
+            if physical >= 8:
+                return 8
+            if physical >= 4:
+                return 4
+            if logical >= 8:
+                return 8
+            if logical >= 4:
+                return 4
+            return max(1, logical or 2)
+        except Exception as exc:
+            logger.warning("Unable to detect CPU topology with psutil: %s", exc)
 
-        if physical:
-            # Si detecta una CPU con topología masiva (más de 4 núcleos físicos como tu i7),
-            # limitar a 4 u 8 previene que los E-Cores ralenticen las barreras síncronas de XNNPACK.
-            # 4 es el punto dulce recomendado por Google; 8 es el límite para usar solo P-Cores físicos.
-            optimal = 4 if physical <= 4 else 8
-            logger.info("Detected %d physical CPU cores. Optimizing backend to %d threads.", physical, optimal)
-            return optimal
-
-        logical = psutil.cpu_count(logical=True)
-        if logical:
-            optimal = 4 if logical <= 4 else 8
-            logger.info("Physical core detection unavailable. Using fallback of %d threads.", optimal)
-            return optimal
-
-    except Exception as e:
-        logger.warning("Unable to detect CPU topology using psutil: %s", e)
-
-    cpu_count = os.cpu_count()
-    if cpu_count:
-        return 4 if cpu_count <= 4 else 8
-
-    logger.warning("CPU detection failed. Falling back to Google's standard 4 threads.")
-    return 4
+    cpu_count = os.cpu_count() or 0
+    if cpu_count >= 8:
+        return 8
+    if cpu_count >= 4:
+        return 4
+    return max(1, cpu_count or 2)
 
 
 def force_garbage_collection() -> None:
@@ -163,11 +157,28 @@ async def init_engine() -> Engine:
 
         cpu_backend = CPU()
         cpu_backend.num_threads = threads
+        cpu_backend.use_kernel = True
+
+        vision_backend = CPU()
+        vision_backend.num_threads = max(1, threads)
+        vision_backend.use_kernel = True
+
+        logger.info(
+            "Configuring LiteRT backend with threads=%d and use_kernel=%s",
+            cpu_backend.num_threads,
+            getattr(cpu_backend, "use_kernel", None),
+        )
+        logger.info(
+            "Configuring LiteRT vision backend with threads=%d and use_kernel=%s",
+            vision_backend.num_threads,
+            getattr(vision_backend, "use_kernel", None),
+        )
 
         _engine = await asyncio.to_thread(
             Engine,
             model_path=settings.model_path,
             backend=cpu_backend,
+            vision_backend=vision_backend,
             max_num_tokens=16384,
         )
 

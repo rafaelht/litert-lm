@@ -9,7 +9,6 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from anyio import to_thread
 
 from app.config import get_settings
 from app.conversation_manager import get_conversation_manager
@@ -39,14 +38,13 @@ from app.utils import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["openai-compatible"])
 
-
 def _sse_data(payload: dict[str, Any] | str) -> str:
     if isinstance(payload, str):
         return f"data: {payload}\n\n"
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
-def _estimate_token_count(text: str) -> int:
+async def _estimate_token_count(text: str) -> int:
     if not text:
         return 0
 
@@ -54,7 +52,7 @@ def _estimate_token_count(text: str) -> int:
         engine = get_engine()
         if engine is None:
             return 0
-        tokens = engine.tokenize(text)
+        tokens = await asyncio.to_thread(engine.tokenize, text)
         return len(tokens) if isinstance(tokens, list) else 0
     except Exception:
         return 0
@@ -110,12 +108,13 @@ async def chat_completions(
 
     logger.info("[DEBUG] Payload messages count: %d", len(message_dicts))
 
-    incremental_message = extract_incremental_message(message_dicts).strip()
+    incremental_message = extract_incremental_message(message_dicts)
+    incremental_text = normalize_text_content(incremental_message.get("content", ""))
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
     # 1. CORTOCIRCUITO: Intercepción de prompts administrativos (Títulos y Tags)
-    msg_lower = incremental_message.lower()
+    msg_lower = incremental_text.lower()
     
     is_title_req = (
         "title" in msg_lower or 
@@ -197,22 +196,17 @@ async def chat_completions(
                 }]
             })
 
-    # 2. FLUJO NORMAL DE CONVERSACIÓN (Aislado y Protegido)
-    
-    # Asegurar recarga transparente del motor si fue removido por inactividad
+    # 2. FLUJO NORMAL DE CONVERSACIÓN
     engine_instance = await init_engine()
 
     api_key = extract_api_key(authorization)
     conversation_id = make_conversation_id(api_key, request.model, message_dicts)
     manager = get_conversation_manager()
 
-    # Si el motor se recreó, actualizar referencias internas y limpiar el caché
     if check_and_consume_reload_flag():
         logger.info("Detectada recarga del Engine. Limpiando y reasignando referencias de C++.")
-        
         if hasattr(manager, "_engine"):
             manager._engine = engine_instance
-            
         if hasattr(manager, "_conversations"):
             manager._conversations.clear()
         elif hasattr(manager, "clear"):
@@ -224,7 +218,7 @@ async def chat_completions(
     )
     state = sync_result.state
     sync_snapshot = sync_result.snapshot
-    incremental_message = sync_snapshot.last_content
+    incremental_message = extract_incremental_message(message_dicts)
     
     update_engine_activity()
 
@@ -251,28 +245,61 @@ async def chat_completions(
                 yield _sse_data(first_chunk)
 
                 response_parts: list[str] = []
+                pending_text_parts: list[str] = []
+                last_flush = time.monotonic()
+
                 try:
                     iterator = state.conversation.send_message_async(incremental_message)
-                    
+
                     while True:
-                        disconnected = await raw_request.is_disconnected()
+                        if await raw_request.is_disconnected():
+                            logger.info("Cliente desconectado de OpenWebUI. Abortando stream.")
+                            break
 
                         try:
-                            sdk_chunk = await to_thread.run_sync(next, iterator, None)
-                            if sdk_chunk is None:
-                                break
+                            sdk_chunk = await asyncio.to_thread(next, iterator, None)
                         except StopIteration:
+                            break
+
+                        if sdk_chunk is None:
                             break
 
                         state.touch()
                         update_engine_activity()
-                        
+
                         text_piece = sdk_message_to_text(sdk_chunk)
                         if not text_piece:
                             continue
-                        response_parts.append(text_piece)
 
-                        if not disconnected:
+                        response_parts.append(text_piece)
+                        pending_text_parts.append(text_piece)
+
+                        now = time.monotonic()
+                        should_flush = len(pending_text_parts) >= 4 or (now - last_flush) >= 0.02
+                        if should_flush:
+                            chunk_text = "".join(pending_text_parts)
+                            pending_text_parts.clear()
+                            last_flush = now
+                            if chunk_text:
+                                payload = {
+                                    "id": completion_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": request.model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"content": chunk_text},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                                yield _sse_data(payload)
+
+                    if pending_text_parts:
+                        chunk_text = "".join(pending_text_parts)
+                        pending_text_parts.clear()
+                        if chunk_text:
                             payload = {
                                 "id": completion_id,
                                 "object": "chat.completion.chunk",
@@ -281,13 +308,13 @@ async def chat_completions(
                                 "choices": [
                                     {
                                         "index": 0,
-                                        "delta": {"content": text_piece},
+                                        "delta": {"content": chunk_text},
                                         "finish_reason": None,
                                     }
                                 ],
                             }
                             yield _sse_data(payload)
-                        
+
                 except Exception as exc:
                     logger.exception("Streaming failed for conversation %s", conversation_id)
                     err_payload = {
@@ -299,7 +326,6 @@ async def chat_completions(
                     }
                     yield _sse_data(err_payload)
                     return
-
                 response_text = "".join(response_parts)
                 completed_history = build_completed_history(sync_snapshot, response_text)
                 apply_snapshot_to_state(
@@ -356,8 +382,8 @@ async def chat_completions(
     )
 
     prompt_text = "\n".join(normalize_text_content(msg.get("content")) for msg in message_dicts)
-    prompt_tokens = _estimate_token_count(prompt_text)
-    completion_tokens = _estimate_token_count(response_text)
+    prompt_tokens = await _estimate_token_count(prompt_text)
+    completion_tokens = await _estimate_token_count(response_text)
 
     response = ChatCompletionResponse(
         id=completion_id,

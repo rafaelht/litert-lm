@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any
+from urllib.parse import unquote_to_bytes
+from urllib.request import urlopen
 
 
 def now_ts() -> float:
@@ -62,6 +65,125 @@ def extract_api_key(auth_header: str | None) -> str:
     return auth_header.strip() or "anonymous"
 
 
+def _build_image_content(part: dict[str, Any]) -> dict[str, Any] | None:
+    image_url = part.get("image_url")
+    if isinstance(image_url, dict):
+        image_source = image_url.get("url")
+    elif isinstance(image_url, str):
+        image_source = image_url
+    else:
+        image_source = part.get("url")
+
+    if not isinstance(image_source, str) or not image_source.strip():
+        return None
+
+    if image_source.startswith("data:"):
+        header, encoded = image_source.split(",", 1)
+        if ";base64" in header.lower():
+            try:
+                image_bytes = base64.b64decode(encoded.encode("utf-8"))
+            except Exception:
+                return None
+        else:
+            image_bytes = unquote_to_bytes(encoded)
+        return {"type": "image", "blob": base64.b64encode(image_bytes).decode("utf-8")}
+
+    if image_source.startswith(("http://", "https://")):
+        try:
+            with urlopen(image_source) as response:
+                image_bytes = response.read()
+        except Exception:
+            return None
+        return {"type": "image", "blob": base64.b64encode(image_bytes).decode("utf-8")}
+
+    return None
+
+
+def _build_audio_content(part: dict[str, Any]) -> dict[str, Any] | None:
+    audio_payload = part.get("input_audio")
+    if isinstance(audio_payload, dict):
+        audio_source = audio_payload.get("data")
+    else:
+        audio_source = part.get("audio")
+
+    if isinstance(audio_source, dict):
+        audio_source = audio_source.get("data")
+    elif isinstance(audio_source, str):
+        audio_source = audio_source
+    else:
+        audio_source = part.get("url")
+
+    if not isinstance(audio_source, str) or not audio_source.strip():
+        return None
+
+    if audio_source.startswith("data:"):
+        header, encoded = audio_source.split(",", 1)
+        if ";base64" in header.lower():
+            try:
+                audio_bytes = base64.b64decode(encoded.encode("utf-8"))
+            except Exception:
+                return None
+        else:
+            audio_bytes = unquote_to_bytes(encoded)
+        return {"type": "audio", "blob": base64.b64encode(audio_bytes).decode("utf-8")}
+
+    if audio_source.startswith(("http://", "https://")):
+        try:
+            with urlopen(audio_source) as response:
+                audio_bytes = response.read()
+        except Exception:
+            return None
+        return {"type": "audio", "blob": base64.b64encode(audio_bytes).decode("utf-8")}
+
+    return None
+
+
+def build_sdk_content_parts(content: Any) -> list[dict[str, Any]] | str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append({"type": "text", "text": part})
+                continue
+
+            if not isinstance(part, dict):
+                continue
+
+            part_type = part.get("type")
+            if part_type in {"text", "input_text"}:
+                text_value = part.get("text")
+                if isinstance(text_value, str) and text_value:
+                    parts.append({"type": "text", "text": text_value})
+            elif part_type in {"image_url", "image", "input_image"}:
+                image_content = _build_image_content(part)
+                if image_content is not None:
+                    parts.append(image_content)
+            elif part_type in {"audio_url", "audio", "input_audio"}:
+                audio_content = _build_audio_content(part)
+                if audio_content is not None:
+                    parts.append(audio_content)
+
+        return parts
+
+    if isinstance(content, dict):
+        part_type = content.get("type")
+        if part_type in {"text", "input_text"} and isinstance(content.get("text"), str):
+            return [{"type": "text", "text": content["text"]}]
+        if part_type in {"image_url", "image", "input_image"}:
+            image_content = _build_image_content(content)
+            if image_content is not None:
+                return [image_content]
+        if part_type in {"audio_url", "audio", "input_audio"}:
+            audio_content = _build_audio_content(content)
+            if audio_content is not None:
+                return [audio_content]
+
+    return []
+
+
 def normalize_text_content(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -80,6 +202,20 @@ def normalize_text_content(content: Any) -> str:
             return content["text"]
 
     return ""
+
+
+def build_sdk_message_payload(message: dict[str, Any] | None) -> dict[str, Any]:
+    if message is None:
+        return {"role": "user", "content": ""}
+
+    role = str(message.get("role", "user"))
+    content = message.get("content")
+    if isinstance(content, str):
+        return {"role": role, "content": content}
+    if content is None:
+        return {"role": role, "content": ""}
+
+    return {"role": role, "content": build_sdk_content_parts(content)}
 
 
 def stable_json_hash(payload: Any) -> str:
@@ -221,10 +357,10 @@ def extract_first_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def extract_incremental_message(messages: list[dict[str, Any]]) -> str:
+def extract_incremental_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
     if not messages:
         raise ValueError("messages must not be empty")
-    return normalize_text_content(messages[-1].get("content", ""))
+    return build_sdk_message_payload(messages[-1])
 
 
 def bootstrap_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -243,20 +379,18 @@ def bootstrap_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if role in {"system", "developer"}:
             continue
 
-        content = normalize_text_content(msg.get("content", ""))
-
         if role in {"user", "assistant"}:
-            bootstrapped.append({"role": role, "content": content})
+            bootstrapped.append(build_sdk_message_payload(msg))
 
     return bootstrapped
 
 
-def sdk_bootstrap_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+def sdk_bootstrap_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     bootstrapped = bootstrap_messages(messages)
     return [
         {
             "role": str(message.get("role", "")),
-            "content": normalize_text_content(message.get("content", "")).strip(),
+            "content": message.get("content", ""),
         }
         for message in bootstrapped
         if message.get("role") in {"user", "assistant"}

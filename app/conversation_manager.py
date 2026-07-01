@@ -8,6 +8,7 @@ from typing import Any
 from litert_lm import Conversation, Engine
 
 from app.config import get_settings
+from app.tools import get_available_tools
 from app.utils import now_ts
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,20 @@ class ConversationManager:
         self._conversations: dict[str, ConversationState] = {}
         self._manager_lock = asyncio.Lock()
 
+    async def _create_conversation(
+        self,
+        *,
+        bootstrap_messages: list[dict[str, Any]],
+        system_message: str | None = None,
+        tools: list[Any] | None = None,
+    ) -> Conversation:
+        return await asyncio.to_thread(
+            self._engine.create_conversation,
+            messages=bootstrap_messages,
+            system_message=system_message,
+            tools=tools or get_available_tools(),
+        )
+
     async def get_or_create(
         self,
         conversation_id: str,
@@ -55,10 +70,10 @@ class ConversationManager:
 
             await self._evict_if_needed_locked()
             logger.info("Creating new conversation: %s", conversation_id)
-            conversation = await asyncio.to_thread(
-                self._engine.create_conversation,
-                messages=bootstrap_messages,
+            conversation = await self._create_conversation(
+                bootstrap_messages=bootstrap_messages,
                 system_message=system_message,
+                tools=get_available_tools(),
             )
             state = ConversationState(
                 conversation_id=conversation_id,
@@ -85,10 +100,10 @@ class ConversationManager:
 
             await self._evict_if_needed_locked()
             logger.info("Rebuilding conversation: %s", conversation_id)
-            conversation = await asyncio.to_thread(
-                self._engine.create_conversation,
-                messages=bootstrap_messages,
+            conversation = await self._create_conversation(
+                bootstrap_messages=bootstrap_messages,
                 system_message=system_message,
+                tools=get_available_tools(),
             )
             state = ConversationState(
                 conversation_id=conversation_id,
