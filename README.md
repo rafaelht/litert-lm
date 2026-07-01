@@ -41,6 +41,47 @@ requirements.txt
 - `HOST_PORT` (default: `8001`, puerto publicado en el host)
 - `SESSION_TIMEOUT` en segundos (default: `1800`)
 - `MAX_ACTIVE_CONVERSATIONS` (default: `1000`)
+- `LITERT_MAX_NUM_TOKENS` (opcional, sin valor usa el contexto por defecto del SDK)
+
+### Ajustar contexto desde `.env` (Windows)
+
+Puedes cambiar el contexto de forma simple editando `.env`:
+
+```env
+LITERT_MAX_NUM_TOKENS=8192
+```
+
+Notas:
+- `scripts/start-windows.ps1` carga este valor de `.env` automaticamente.
+- Si `.env` define `LITERT_MAX_NUM_TOKENS`, ese valor tiene prioridad sobre uno viejo que quede en la terminal.
+- Si dejas `LITERT_MAX_NUM_TOKENS=` vacio, el servidor usa el default del SDK.
+- Cambios en esta variable requieren reiniciar el servidor.
+
+### Benchmark automatico de contexto (Windows)
+
+Para comparar `default`, `2048`, `8192` y `16384` en 3 corridas cada uno:
+
+```powershell
+./scripts/benchmark-context.ps1
+```
+
+Si el puerto indicado ya esta ocupado (por ejemplo `8005`), el benchmark usa automaticamente el siguiente puerto libre.
+
+Opcionalmente, puedes cambiar prompt y repeticiones:
+
+```powershell
+./scripts/benchmark-context.ps1 -Prompt "Resume this text in 6 bullets" -RunsPerConfig 3 -ServerHost 127.0.0.1 -Port 8005
+```
+
+Para simular uso real de chat (historial creciendo por turnos), usa:
+
+```powershell
+./scripts/benchmark-context.ps1 -Prompt "Analiza este requerimiento" -PromptRepeat 30 -SessionTurns 4 -RunsPerConfig 2
+```
+
+Parametros nuevos del benchmark:
+- `SessionTurns`: cantidad de turnos por corrida (cada turno reenvia el historial acumulado)
+- `PromptRepeat`: multiplica el prompt para estresar contexto/prefill
 
 ## Estrategia de conversation_id
 
