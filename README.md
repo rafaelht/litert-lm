@@ -42,6 +42,7 @@ requirements.txt
 - `SESSION_TIMEOUT` en segundos (default: `1800`)
 - `MAX_ACTIVE_CONVERSATIONS` (default: `1000`)
 - `LITERT_MAX_NUM_TOKENS` (opcional, sin valor usa el contexto por defecto del SDK)
+- `ENABLE_INTERNAL_TOOLS` (default: `false`; si está en `true`, activa tools internas del backend)
 
 ### Ajustar contexto desde `.env` (Windows)
 
